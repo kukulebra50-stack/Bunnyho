@@ -1,13 +1,6 @@
 --[[
     БАННИХОП СКРИПТ ДЛЯ ROBLOX
-    Версия: 3.0 (Исправленная)
-    Автор: Обновлённая версия
-    
-    ИЗМЕНЕНИЯ:
-    • Добавлен эффект удара об землю (тряска камеры + звук) при падении с высоты
-    • Кнопка больше не пропадает при смерти (ResetOnSpawn = false)
-    • Убрано ограничение скорости (можно разогнаться бесконечно)
-    • Исправлено: скорость сбрасывается при остановке или прекращении прыжков
+    Версия: 3.1 (Исправлена механика)
     
     ИСПОЛЬЗОВАНИЕ:
     loadstring(game:HttpGet("https://raw.githubusercontent.com/kukulebra50-stack/Bunnyho/refs/heads/main/Bhopchiki"))()
@@ -15,103 +8,65 @@
 
 -- ================== НАСТРАИВАЕМЫЕ ПАРАМЕТРЫ ==================
 local SETTINGS = {
-    BASE_SPEED = 16,              -- Базовая скорость ходьбы
-    MAX_SPEED = math.huge,        -- БЕЗ ОГРАНИЧЕНИЯ (бесконечная скорость)
-    JUMP_BONUS = 3,               -- Ускорение за каждый прыжок
-    AIR_ACCELERATION = 2,         -- Ускорение в воздухе
-    AIR_ACCEL_INTERVAL = 0.5,    -- Интервал воздушного ускорения (сек)
-    TURN_BONUS = 5,               -- Бонус за поворот камеры
-    IDLE_RESET = 0.5,             -- Время без движения до сброса (уменьшено для быстрого сброса)
-    FALL_RESET_THRESHOLD = 50,    -- Скорость падения для сброса
-    LAND_EFFECT_THRESHOLD = 60,   -- Порог для эффекта удара (выше этого - эффект)
-    CAMERA_SHAKE_INTENSITY = 0.5, -- Сила тряски камеры при ударе
-    CAMERA_SHAKE_TIME = 0.3       -- Длительность тряски камеры (сек)
+    BASE_SPEED = 16,
+    MAX_SPEED = math.huge,
+    JUMP_BONUS = 3,
+    AIR_ACCELERATION = 2,
+    AIR_ACCEL_INTERVAL = 0.5,
+    TURN_BONUS = 5,
+    IDLE_RESET = 1.0,
+    JUMP_TIMEOUT = 1.5,
+    FALL_RESET_THRESHOLD = 50,
+    LAND_EFFECT_THRESHOLD = 60,
+    CAMERA_SHAKE_INTENSITY = 0.5,
+    CAMERA_SHAKE_TIME = 0.3
 }
 -- =============================================================
 
--- Получаем сервисы
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
-local TweenService = game:GetService("TweenService")
-local SoundService = game:GetService("SoundService")
 
--- Ждём загрузки игрока
 local player = Players.LocalPlayer
-if not player then
-    warn("Скрипт должен выполняться на клиенте!")
-    return
-end
+if not player then return end
 
--- Предотвращаем повторный запуск
-if getgenv and getgenv().BhopLoaded then
-    warn("Баннихоп уже запущен!")
-    return
-end
-if getgenv then
-    getgenv().BhopLoaded = true
-end
+if getgenv and getgenv().BhopLoaded then return end
+if getgenv then getgenv().BhopLoaded = true end
 
--- Переменные для механики
 local character, humanoid, rootPart, camera
-local bhopEnabled = false  -- Состояние вкл/выкл
-local isSpaceHeld = false  -- Зажат ли пробел
-local connections = {}     -- Соединения для очистки
-local cameraShakeConnection = nil  -- Для тряски камеры
+local bhopEnabled = false
+local isSpaceHeld = false
+local connections = {}
+local cameraShakeConnection = nil
 
--- Переменные состояния
-local isMoving = false
 local lastLandTime = 0
 local lastMoveTime = tick()
+local lastJumpTime = tick()
 local fallMaxSpeed = 0
 local lastCameraYaw = nil
 local airAccelTimer = 0
-local lastJumpTime = 0
-local jumpTimeout = 1.0    -- Таймаут прыжков (если не прыгали 1 сек - сброс)
 
--- Клавиши движения
-local MOVE_KEYS = {
-    W = true, A = true, S = true, D = true
-}
-
--- Проверка движения
-local function checkMovement()
-    for key in pairs(MOVE_KEYS) do
-        if UserInputService:IsKeyDown(Enum.KeyCode[key]) then
-            return true
-        end
-    end
-    return false
-end
-
--- Эффект удара об землю (тряска камеры + звук)
+-- Функция тряски камеры
 local function playLandEffect(intensity)
-    if not camera then return end
+    if not camera or not rootPart then return end
     
-    -- Отменяем предыдущую тряску если есть
     if cameraShakeConnection then
         cameraShakeConnection:Disconnect()
         cameraShakeConnection = nil
     end
     
-    -- Создаём звук удара (используем встроенный звук Roblox)
     local sound = Instance.new("Sound")
-    sound.SoundId = "rbxassetid://9120386436"  -- Звук удара/взрыва
+    sound.SoundId = "rbxassetid://9120386436"
     sound.Volume = math.min(intensity * 2, 1)
     sound.Parent = rootPart
     sound:Play()
     
-    -- Удаляем звук после проигрывания
     task.delay(1, function()
-        if sound then
-            sound:Destroy()
-        end
+        if sound then sound:Destroy() end
     end)
     
-    -- Тряска камеры
     local startTime = tick()
     local duration = SETTINGS.CAMERA_SHAKE_TIME
-    local originalCFrame = camera.CFrame
     
     cameraShakeConnection = RunService.RenderStepped:Connect(function()
         local elapsed = tick() - startTime
@@ -123,13 +78,10 @@ local function playLandEffect(intensity)
         
         local progress = elapsed / duration
         local currentIntensity = intensity * (1 - progress)
-        
-        -- Случайное смещение камеры
         local shakeX = (math.random() - 0.5) * 2 * currentIntensity
         local shakeY = (math.random() - 0.5) * 2 * currentIntensity
         local shakeZ = (math.random() - 0.5) * 2 * currentIntensity
         
-        -- Применяем тряску к позиции камеры
         camera.CFrame = camera.CFrame * CFrame.new(shakeX, shakeY, shakeZ)
     end)
 end
@@ -139,69 +91,65 @@ local function resetSpeed(reason)
     if humanoid then
         humanoid.WalkSpeed = SETTINGS.BASE_SPEED
     end
-    lastMoveTime = tick()
     airAccelTimer = 0
     fallMaxSpeed = 0
-    lastJumpTime = 0
-    
-    -- Отладочное сообщение (можно убрать)
-    if reason then
-        print("Скорость сброшена: " .. reason)
-    end
+    if reason then print("Сброс: " .. reason) end
+end
+
+-- Проверка движения
+local function isMoving()
+    return UserInputService:IsKeyDown(Enum.KeyCode.W)
+        or UserInputService:IsKeyDown(Enum.KeyCode.A)
+        or UserInputService:IsKeyDown(Enum.KeyCode.S)
+        or UserInputService:IsKeyDown(Enum.KeyCode.D)
 end
 
 -- Основной цикл
 local function onHeartbeat(deltaTime)
     if not bhopEnabled then return end
-    if not humanoid or not rootPart or not camera then return end
+    if not humanoid or not rootPart then return end
 
-    -- Проверка на движение
-    local currentlyMoving = checkMovement()
-    
-    -- Проверка на бездействие (не двигается И не прыгает)
-    local timeSinceLastJump = tick() - lastJumpTime
-    local timeSinceLastMove = tick() - lastMoveTime
-    
-    if not currentlyMoving then
-        -- Если не двигается и прошло время сброса
-        if timeSinceLastMove > SETTINGS.IDLE_RESET then
-            resetSpeed("нет движения")
-            return
-        end
-    else
+    local moving = isMoving()
+    local state = humanoid:GetState()
+    local airborne = (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping)
+
+    -- Обновляем время движения
+    if moving then
         lastMoveTime = tick()
     end
-    
-    -- Если не прыгал долгое время - тоже сбрасываем
-    if timeSinceLastJump > jumpTimeout and humanoid.WalkSpeed > SETTINGS.BASE_SPEED then
-        resetSpeed("нет прыжков")
+
+    -- Проверка на бездействие
+    if not moving and (tick() - lastMoveTime) > SETTINGS.IDLE_RESET then
+        resetSpeed("нет движения")
         return
     end
 
-    local state = humanoid:GetState()
-    local isAirborne = (state == Enum.HumanoidStateType.Freefall or 
-                       state == Enum.HumanoidStateType.Jumping)
+    -- Проверка на отсутствие прыжков
+    if not airborne and (tick() - lastJumpTime) > SETTINGS.JUMP_TIMEOUT then
+        if humanoid.WalkSpeed > SETTINGS.BASE_SPEED then
+            resetSpeed("нет прыжков")
+        end
+    end
 
-    -- Воздушное ускорение (только если двигается И в воздухе)
-    if isAirborne and currentlyMoving then
-        airAccelTimer += deltaTime
+    -- Воздушное ускорение
+    if airborne and moving then
+        airAccelTimer = airAccelTimer + deltaTime
         while airAccelTimer >= SETTINGS.AIR_ACCEL_INTERVAL do
-            airAccelTimer -= SETTINGS.AIR_ACCEL_INTERVAL
-            humanoid.WalkSpeed = humanoid.WalkSpeed + SETTINGS.AIR_ACCELERATION  -- Без ограничения!
+            airAccelTimer = airAccelTimer - SETTINGS.AIR_ACCEL_INTERVAL
+            humanoid.WalkSpeed = humanoid.WalkSpeed + SETTINGS.AIR_ACCELERATION
         end
     else
         airAccelTimer = 0
     end
 
     -- Бонус за поворот камеры
-    if camera and currentlyMoving then
+    if camera and moving then
         local camLook = camera.CFrame.LookVector
         local currentYaw = math.atan2(camLook.X, camLook.Z)
         if lastCameraYaw then
             local deltaYaw = math.abs(currentYaw - lastCameraYaw)
             if deltaYaw > 0.005 then
-                local turnBonus = SETTINGS.TURN_BONUS * deltaYaw
-                humanoid.WalkSpeed = humanoid.WalkSpeed + turnBonus  -- Без ограничения!
+                humanoid.WalkSpeed = humanoid.WalkSpeed + (SETTINGS.TURN_BONUS * deltaYaw)
             end
         end
         lastCameraYaw = currentYaw
@@ -213,8 +161,6 @@ local function onHeartbeat(deltaTime)
         if velY < 0 then
             fallMaxSpeed = math.max(fallMaxSpeed, -velY)
         end
-    else
-        fallMaxSpeed = 0
     end
 end
 
@@ -225,7 +171,7 @@ local function onStateChanged(_, newState)
     if newState == Enum.HumanoidStateType.Landed then
         lastLandTime = tick()
         
-        -- ЭФФЕКТ УДАРА ОБ ЗЕМЛЮ
+        -- Эффект удара
         if fallMaxSpeed > SETTINGS.LAND_EFFECT_THRESHOLD then
             local intensity = math.min((fallMaxSpeed - SETTINGS.LAND_EFFECT_THRESHOLD) / 100, SETTINGS.CAMERA_SHAKE_INTENSITY)
             playLandEffect(intensity)
@@ -237,8 +183,8 @@ local function onStateChanged(_, newState)
         end
         fallMaxSpeed = 0
 
-        -- Автопрыжок
-        if isSpaceHeld and humanoid and checkMovement() then
+        -- АВТОПРЫЖОК
+        if isSpaceHeld and humanoid and humanoid.Parent and isMoving() then
             task.wait()
             if humanoid and humanoid.Parent and bhopEnabled then
                 humanoid:Jump()
@@ -246,18 +192,14 @@ local function onStateChanged(_, newState)
         end
 
     elseif newState == Enum.HumanoidStateType.Jumping then
-        lastJumpTime = tick()  -- Обновляем время последнего прыжка
+        lastJumpTime = tick()
         
+        -- Бонус за прыжок
         if tick() - lastLandTime <= 0.2 then
             if humanoid then
-                humanoid.WalkSpeed = humanoid.WalkSpeed + SETTINGS.JUMP_BONUS  -- Без ограничения!
+                humanoid.WalkSpeed = humanoid.WalkSpeed + SETTINGS.JUMP_BONUS
             end
             lastLandTime = 0
-        end
-    elseif newState == Enum.HumanoidStateType.Running or newState == Enum.HumanoidStateType.RunningNoPhysics then
-        -- Обновляем время движения
-        if checkMovement() then
-            lastMoveTime = tick()
         end
     end
 end
@@ -280,9 +222,6 @@ local function cleanup()
     lastCameraYaw = nil
     fallMaxSpeed = 0
     airAccelTimer = 0
-    lastMoveTime = tick()
-    lastJumpTime = 0
-    isMoving = false
 end
 
 -- Инициализация персонажа
@@ -292,28 +231,20 @@ local function setupCharacter(char)
     
     humanoid = char:WaitForChild("Humanoid", 10)
     rootPart = char:WaitForChild("HumanoidRootPart", 10)
-    if not humanoid or not rootPart then
-        warn("Не удалось найти Humanoid или RootPart")
-        return
-    end
+    if not humanoid or not rootPart then return end
 
     humanoid.WalkSpeed = SETTINGS.BASE_SPEED
     camera = workspace.CurrentCamera
-    if not camera then return end
-
-    -- Сброс переменных
+    
     fallMaxSpeed = 0
     airAccelTimer = 0
     lastMoveTime = tick()
+    lastJumpTime = tick()
     lastCameraYaw = nil
-    isMoving = false
-    lastJumpTime = 0
 
-    -- Подключаем обработчики
     connections.heartbeat = RunService.Heartbeat:Connect(onHeartbeat)
     connections.stateChanged = humanoid.StateChanged:Connect(onStateChanged)
     
-    -- Отслеживание пробела
     connections.inputBegan = UserInputService.InputBegan:Connect(function(input, processed)
         if processed then return end
         if input.KeyCode == Enum.KeyCode.Space then
@@ -328,23 +259,19 @@ local function setupCharacter(char)
     end)
 end
 
--- === СОЗДАНИЕ GUI ===
+-- === GUI ===
 local function createGUI()
     local playerGui = player:WaitForChild("PlayerGui")
     
-    -- Удаляем старый GUI если есть
     local old = playerGui:FindFirstChild("BhopGui")
     if old then old:Destroy() end
 
-    -- Создаём GUI
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "BhopGui"
-    screenGui.ResetOnSpawn = false  -- НЕ пропадает при смерти!
+    screenGui.ResetOnSpawn = false
     screenGui.Parent = playerGui
 
-    -- Кнопка
     local button = Instance.new("TextButton")
-    button.Name = "ToggleButton"
     button.Size = UDim2.new(0, 200, 0, 35)
     button.Position = UDim2.new(0, 10, 0, 10)
     button.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
@@ -354,41 +281,20 @@ local function createGUI()
     button.TextSize = 16
     button.Parent = screenGui
 
-    -- Скругление углов
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, 8)
     corner.Parent = button
 
-    -- Подсказка
     local hint = Instance.new("TextLabel")
     hint.Size = UDim2.new(0, 200, 0, 20)
     hint.Position = UDim2.new(0, 10, 0, 50)
     hint.BackgroundTransparency = 1
     hint.TextColor3 = Color3.fromRGB(200, 200, 200)
-    hint.Text = "Зажмите W + Space"
+    hint.Text = "W + Space = разгон"
     hint.Font = Enum.Font.Gotham
     hint.TextSize = 12
     hint.Parent = screenGui
-    
-    -- Индикатор скорости
-    local speedLabel = Instance.new("TextLabel")
-    speedLabel.Size = UDim2.new(0, 200, 0, 20)
-    speedLabel.Position = UDim2.new(0, 10, 0, 70)
-    speedLabel.BackgroundTransparency = 1
-    speedLabel.TextColor3 = Color3.fromRGB(255, 255, 150)
-    speedLabel.Text = "Скорость: 16"
-    speedLabel.Font = Enum.Font.Gotham
-    speedLabel.TextSize = 12
-    speedLabel.Parent = screenGui
-    
-    -- Обновление индикатора скорости
-    connections.speedUpdate = RunService.Heartbeat:Connect(function()
-        if humanoid and bhopEnabled then
-            speedLabel.Text = "Скорость: " .. math.floor(humanoid.WalkSpeed)
-        end
-    end)
 
-    -- Логика кнопки
     button.MouseButton1Click:Connect(function()
         bhopEnabled = not bhopEnabled
         
@@ -403,7 +309,7 @@ local function createGUI()
     end)
 end
 
--- Главная функция запуска
+-- Запуск
 local function init()
     createGUI()
     
@@ -412,25 +318,7 @@ local function init()
     end
     
     connections.characterAdded = player.CharacterAdded:Connect(setupCharacter)
-    
-    -- Очистка при выходе
-    player.AncestryChanged:Connect(function()
-        if not player:IsDescendantOf(game) then
-            cleanup()
-            if getgenv then
-                getgenv().BhopLoaded = false
-            end
-        end
-    end)
 end
 
--- Запускаем всё
 init()
-
-print("✅ BHop скрипт v3.0 загружен!")
-print("🎯 Особенности:")
-print("  - Нет ограничения скорости (разгоняйтесь бесконечно)")
-print("  - Эффект удара об землю при падении с высоты")
-print("  - Кнопка не пропадает при смерти")
-print("  - Скорость сбрасывается при остановке")
-print("📌 Зажмите W + Space для разгона")
+print("BHop v3.1 загружен! W + Space = разгон")
