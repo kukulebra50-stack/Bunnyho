@@ -1,0 +1,289 @@
+--[[
+    ЕДИНЫЙ СКРИПТ БАННИХОПА ДЛЯ ИНЖЕКТОРОВ (DELTA, SCRIPT-WARE И Т.Д.)
+    - Зажмите ПРОБЕЛ (Space) – персонаж будет автоматически прыгать при каждом приземлении.
+    - Разгон происходит благодаря прыжкам, движению и поворотам камеры.
+    - Включение/выключение кнопкой в левом верхнем углу экрана.
+    - Максимальная скорость повышена до 3000 (можно изменить в настройках).
+    - Просто вставьте код в окно выполнения инжектора и запустите.
+]]
+
+-- ================== НАСТРАИВАЕМЫЕ ПАРАМЕТРЫ ==================
+local BASE_WALKSPEED = 16
+local MAX_WALKSPEED = 3000          -- <-- Максимальная скорость (было 300, теперь 3000)
+local BHOP_JUMP_BONUS = 3           -- ускорение за каждый успешный прыжок
+local AIR_ACCELERATION = 2          -- ускорение в воздухе за интервал
+local AIR_ACCELERATION_INTERVAL = 0.5
+local TURN_BONUS_COEFFICIENT = 5    -- бонус за поворот камеры
+local IDLE_RESET_TIME = 1           -- время без движения до сброса скорости
+local FALL_SPEED_THRESHOLD = 50     -- порог вертикальной скорости падения для сброса
+-- =============================================================
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local character, humanoid, rootPart, camera
+local bhopEnabled          -- BoolValue
+
+-- Состояния механики
+local isMovementPressed = false
+local lastLandTime = 0
+local lastMoveTime = nil
+local isAirborne = false
+local fallMaxSpeed = 0
+local lastCameraYaw = nil
+local airAccelTimer = 0
+
+-- Флаг зажатого пробела
+local isSpaceDown = false
+
+-- Соединения для очистки
+local connections = {}
+
+local MOVE_KEYS = {
+    [Enum.KeyCode.W] = true,
+    [Enum.KeyCode.A] = true,
+    [Enum.KeyCode.S] = true,
+    [Enum.KeyCode.D] = true,
+}
+
+-- Проверка движения
+local function isMoving()
+    for key, _ in pairs(MOVE_KEYS) do
+        if UserInputService:IsKeyDown(key) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Сброс скорости
+local function resetSpeed()
+    if humanoid then
+        humanoid.WalkSpeed = BASE_WALKSPEED
+    end
+    lastMoveTime = nil
+    airAccelTimer = 0
+    fallMaxSpeed = 0
+end
+
+-- Основной цикл обновления
+local function onHeartbeat(deltaTime)
+    if not bhopEnabled or bhopEnabled.Value ~= true then return end
+    if not humanoid or not rootPart or not camera then return end
+
+    -- Проверка движения
+    if isMoving() then
+        if not isMovementPressed then
+            isMovementPressed = true
+            lastMoveTime = tick()
+        else
+            lastMoveTime = tick()
+        end
+    else
+        isMovementPressed = false
+        if lastMoveTime and (tick() - lastMoveTime) > IDLE_RESET_TIME then
+            resetSpeed()
+        end
+        return
+    end
+
+    local state = humanoid:GetState()
+    isAirborne = (state == Enum.HumanoidStateType.Freefall or state == Enum.HumanoidStateType.Jumping)
+
+    -- 1. Непрерывное воздушное ускорение
+    if isAirborne then
+        airAccelTimer = airAccelTimer + deltaTime
+        while airAccelTimer >= AIR_ACCELERATION_INTERVAL do
+            airAccelTimer -= AIR_ACCELERATION_INTERVAL
+            humanoid.WalkSpeed = math.min(humanoid.WalkSpeed + AIR_ACCELERATION, MAX_WALKSPEED)
+        end
+    else
+        airAccelTimer = 0
+    end
+
+    -- 2. Бонус за поворот камеры
+    local camLook = camera.CFrame.LookVector
+    local currentYaw = math.atan2(camLook.X, camLook.Z)
+    if lastCameraYaw then
+        local deltaYaw = math.abs(currentYaw - lastCameraYaw)
+        if deltaYaw > 0.005 then
+            local turnBonus = TURN_BONUS_COEFFICIENT * deltaYaw
+            humanoid.WalkSpeed = math.min(humanoid.WalkSpeed + turnBonus, MAX_WALKSPEED)
+        end
+    end
+    lastCameraYaw = currentYaw
+
+    -- 3. Отслеживание падения
+    if state == Enum.HumanoidStateType.Freefall then
+        local velY = rootPart.Velocity.Y
+        if velY < 0 then
+            fallMaxSpeed = math.max(fallMaxSpeed, -velY)
+        end
+    else
+        fallMaxSpeed = 0
+    end
+end
+
+-- Обработчик смены состояния Humanoid
+local function onStateChanged(oldState, newState)
+    if not bhopEnabled or bhopEnabled.Value ~= true then return end
+
+    if newState == Enum.HumanoidStateType.Landed then
+        lastLandTime = tick()
+        -- Сброс при сильном падении
+        if fallMaxSpeed > FALL_SPEED_THRESHOLD then
+            resetSpeed()
+        end
+        fallMaxSpeed = 0
+
+        -- АВТОМАТИЧЕСКИЙ ПРЫЖОК, ЕСЛИ ЗАЖАТ ПРОБЕЛ
+        if isSpaceDown and humanoid then
+            -- Небольшая задержка, чтобы корректно перейти в состояние прыжка
+            task.wait()
+            if humanoid and humanoid.Parent then
+                humanoid:Jump()
+            end
+        end
+
+    elseif newState == Enum.HumanoidStateType.Jumping then
+        -- Бонус за прыжок сразу после приземления
+        if tick() - lastLandTime <= 0.2 then
+            if humanoid then
+                humanoid.WalkSpeed = math.min(humanoid.WalkSpeed + BHOP_JUMP_BONUS, MAX_WALKSPEED)
+            end
+            lastLandTime = 0
+        end
+    end
+end
+
+-- Сброс при выключении механики
+local function onBHopChanged(value)
+    if value == false then
+        if humanoid then
+            humanoid.WalkSpeed = BASE_WALKSPEED
+        end
+        lastMoveTime = nil
+        airAccelTimer = 0
+        fallMaxSpeed = 0
+    end
+end
+
+-- Очистка при смене персонажа
+local function cleanup()
+    for _, conn in pairs(connections) do
+        conn:Disconnect()
+    end
+    connections = {}
+    humanoid = nil
+    rootPart = nil
+    camera = nil
+    lastCameraYaw = nil
+    fallMaxSpeed = 0
+    airAccelTimer = 0
+    lastMoveTime = nil
+    isAirborne = false
+    isMovementPressed = false
+    isSpaceDown = false
+end
+
+-- Инициализация механики для конкретного персонажа
+local function setupCharacter(char)
+    cleanup()
+    character = char
+    humanoid = character:WaitForChild("Humanoid", 10)
+    rootPart = character:WaitForChild("HumanoidRootPart", 10)
+    if not humanoid or not rootPart then return end
+
+    humanoid.WalkSpeed = BASE_WALKSPEED
+    camera = workspace.CurrentCamera
+    if not camera then return end
+
+    fallMaxSpeed = 0
+    airAccelTimer = 0
+    lastMoveTime = nil
+    lastCameraYaw = nil
+    isAirborne = false
+    isMovementPressed = false
+    isSpaceDown = false
+
+    -- Основные циклы
+    connections.heartbeat = RunService.Heartbeat:Connect(onHeartbeat)
+    connections.stateChanged = humanoid.StateChanged:Connect(onStateChanged)
+
+    -- Отслеживание пробела
+    connections.inputBegan = UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then return end
+        if input.KeyCode == Enum.KeyCode.Space then
+            isSpaceDown = true
+        end
+    end)
+    connections.inputEnded = UserInputService.InputEnded:Connect(function(input, gameProcessed)
+        if input.KeyCode == Enum.KeyCode.Space then
+            isSpaceDown = false
+        end
+    end)
+end
+
+-- === GUI ===
+local function createGUI()
+    local playerGui = player:WaitForChild("PlayerGui")
+    local oldGui = playerGui:FindFirstChild("BHopToggleGui")
+    if oldGui then oldGui:Destroy() end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "BHopToggleGui"
+    screenGui.Parent = playerGui
+
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(0, 200, 0, 40)
+    button.Position = UDim2.new(0, 10, 0, 10)
+    button.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+    button.TextColor3 = Color3.fromRGB(255, 255, 255)
+    button.TextScaled = true
+    button.Font = Enum.Font.SourceSansBold
+    button.Parent = screenGui
+
+    -- BoolValue для состояния
+    local value = player:FindFirstChild("BHopEnabled")
+    if not value then
+        value = Instance.new("BoolValue")
+        value.Name = "BHopEnabled"
+        value.Value = false
+        value.Parent = player
+    end
+    bhopEnabled = value
+
+    local function updateButton()
+        if bhopEnabled.Value then
+            button.Text = "Выключить BHop"
+            button.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+        else
+            button.Text = "Включить BHop"
+            button.BackgroundColor3 = Color3.fromRGB(70, 70, 70)
+        end
+    end
+
+    updateButton()
+    button.MouseButton1Click:Connect(function()
+        bhopEnabled.Value = not bhopEnabled.Value
+    end)
+    bhopEnabled.Changed:Connect(function(val)
+        updateButton()
+        onBHopChanged(val)
+    end)
+end
+
+-- Главная функция
+local function main()
+    createGUI()
+    if player.Character then
+        setupCharacter(player.Character)
+    end
+    connections.characterAdded = player.CharacterAdded:Connect(function(char)
+        setupCharacter(char)
+    end)
+end
+
+main()
